@@ -82,6 +82,7 @@ static ngx_str_t  ngx_http_zstd_ratio = ngx_string("zstd_ratio");
 static ngx_int_t ngx_http_zstd_header_filter(ngx_http_request_t *r);
 static ngx_int_t ngx_http_zstd_body_filter(ngx_http_request_t *r,
     ngx_chain_t *in);
+
 static ngx_int_t ngx_http_zstd_filter_add_data(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
 static ngx_int_t ngx_http_zstd_filter_get_buf(ngx_http_request_t *r,
@@ -90,21 +91,27 @@ static ZSTD_CStream *ngx_http_zstd_filter_create_cstream(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
 static ngx_int_t ngx_http_zstd_filter_compress(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx);
-static ngx_int_t ngx_http_zstd_accept_encoding(ngx_str_t *ae);
+
 static ngx_int_t ngx_http_zstd_ok(ngx_http_request_t *r);
+static ngx_int_t ngx_http_zstd_accept_encoding(ngx_str_t *ae);
+static ngx_uint_t ngx_http_zstd_quantity(u_char *p, u_char *last);
+
 static ngx_int_t ngx_http_zstd_filter_init(ngx_conf_t *cf);
 static void * ngx_http_zstd_create_main_conf(ngx_conf_t *cf);
 static char *ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf);
 static void *ngx_http_zstd_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent,
     void *child);
+
 static ngx_int_t ngx_http_zstd_add_variables(ngx_conf_t *cf);
 static ngx_int_t ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data);
+
 static void * ngx_http_zstd_filter_alloc(void *opaque, size_t size);
 static void ngx_http_zstd_filter_free(void *opaque, void *address);
 static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
-static char *ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+
+static char *ngx_http_zstd_set_num_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
 
 static ngx_http_zstd_comp_level_bounds_t  ngx_http_zstd_comp_level_bounds = {
@@ -124,7 +131,7 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
 
     { ngx_string("zstd_comp_level"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_zstd_set_num_slot_with_negatives,
+      ngx_http_zstd_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, level),
       &ngx_http_zstd_comp_level_bounds },
@@ -491,7 +498,9 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         ctx->action = NGX_HTTP_ZSTD_FILTER_COMPRESS; /* restore */
     }
 
-    if (ngx_buf_size(ctx->out_buf) == 0 && last_action != NGX_HTTP_ZSTD_FILTER_FLUSH) {
+    if (ngx_buf_size(ctx->out_buf) == 0
+        && last_action != NGX_HTTP_ZSTD_FILTER_FLUSH)
+    {
         return NGX_AGAIN;
     }
 
@@ -693,29 +702,6 @@ failed:
 
 
 static ngx_int_t
-ngx_http_zstd_accept_encoding(ngx_str_t *ae)
-{
-    u_char  *p;
-
-    p = ngx_strcasestrn(ae->data, "zstd", sizeof("zstd") - 2);
-    if (p == NULL) {
-        return NGX_DECLINED;
-    }
-
-    if (p == ae->data || (*(p - 1) == ',' || *(p - 1) == ' ')) {
-
-        p += sizeof("zstd") - 1;
-
-        if (p == ae->data + ae->len || *p == ',' || *p == ' ' || *p == ';') {
-            return NGX_OK;
-        }
-    }
-
-    return NGX_DECLINED;
-}
-
-
-static ngx_int_t
 ngx_http_zstd_ok(ngx_http_request_t *r)
 {
     ngx_table_elt_t  *ae;
@@ -739,11 +725,140 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-
     r->gzip_tested = 1;
     r->gzip_ok = 0;
 
     return NGX_OK;
+}
+
+
+/*
+ * a copy of ngx_http_gzip_accept_encoding, for zstd content encoding
+ */
+
+static ngx_int_t
+ngx_http_zstd_accept_encoding(ngx_str_t *ae)
+{
+    u_char  *p, *start, *last;
+
+    start = ae->data;
+    last = start + ae->len;
+
+    for ( ;; ) {
+        p = ngx_strcasestrn(start, "zstd", 4 - 1);
+        if (p == NULL) {
+            return NGX_DECLINED;
+        }
+
+        if (p == start || (*(p - 1) == ',' || *(p - 1) == ' ')) {
+            break;
+        }
+
+        start = p + 4;
+    }
+
+    p += 4;
+
+    while (p < last) {
+        switch (*p++) {
+        case ',':
+            return NGX_OK;
+        case ';':
+            goto quantity;
+        case ' ':
+            continue;
+        default:
+            return NGX_DECLINED;
+        }
+    }
+
+    return NGX_OK;
+
+quantity:
+
+    while (p < last) {
+        switch (*p++) {
+        case 'q':
+        case 'Q':
+            goto equal;
+        case ' ':
+            continue;
+        default:
+            return NGX_DECLINED;
+        }
+    }
+
+    return NGX_OK;
+
+equal:
+
+    if (p + 2 > last || *p++ != '=') {
+        return NGX_DECLINED;
+    }
+
+    if (ngx_http_zstd_quantity(p, last) == 0) {
+        return NGX_DECLINED;
+    }
+
+    return NGX_OK;
+}
+
+
+/*
+ * a copy of ngx_http_gzip_quantity
+ */
+
+static ngx_uint_t
+ngx_http_zstd_quantity(u_char *p, u_char *last)
+{
+    u_char      c;
+    ngx_uint_t  n, q;
+
+    c = *p++;
+
+    if (c != '0' && c != '1') {
+        return 0;
+    }
+
+    q = (c - '0') * 100;
+
+    if (p == last) {
+        return q;
+    }
+
+    c = *p++;
+
+    if (c == ',' || c == ' ') {
+        return q;
+    }
+
+    if (c != '.') {
+        return 0;
+    }
+
+    n = 0;
+
+    while (p < last) {
+        c = *p++;
+
+        if (c == ',' || c == ' ') {
+            break;
+        }
+
+        if (c >= '0' && c <= '9') {
+            q += c - '0';
+            n++;
+            continue;
+        }
+
+        return 0;
+    }
+
+    if (q > 100 || n > 3) {
+        return 0;
+    }
+
+    return q;
 }
 
 
@@ -1020,10 +1135,13 @@ ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data)
 {
     ngx_int_t  *np = data;
 
-    if (*np == 0 || *np < (ngx_int_t)ZSTD_minCLevel() || *np > ZSTD_maxCLevel()) {
+    if (*np == 0 || *np < (ngx_int_t) ZSTD_minCLevel()
+        || *np > ZSTD_maxCLevel())
+    {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "zstd compress level must between %i and %i excluding 0",
-                           (ngx_int_t)ZSTD_minCLevel(), ZSTD_maxCLevel());
+                           "zstd compress level must between %i "
+                           "and %i excluding 0", (ngx_int_t) ZSTD_minCLevel(),
+                           (ngx_int_t) ZSTD_maxCLevel());
 
         return NGX_CONF_ERROR;
     }
@@ -1031,15 +1149,15 @@ ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data)
     return NGX_CONF_OK;
 }
 
+
 static char *
-ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ngx_http_zstd_set_num_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     char  *p = conf;
 
     ngx_int_t        *np;
     ngx_str_t        *value;
     ngx_conf_post_t  *post;
-
 
     np = (ngx_int_t *) (p + cmd->offset);
 
@@ -1050,11 +1168,13 @@ ngx_conf_zstd_set_num_slot_with_negatives(ngx_conf_t *cf, ngx_command_t *cmd, vo
     value = cf->args->elts;
 
     if (*(value[1].data) == '-') {
-        // Parse ignoring the leading '-' character
+        /* Parse ignoring the leading '-' character */
         *np = ngx_atoi(value[1].data + 1, value[1].len - 1);
 
-        // NGX_ERROR is -1 so we need to check for that before making the parsed
-        // result negative
+        /*
+         * NGX_ERROR is -1 so we need to check for that before making the parsed
+         * result negative
+         */
         if (*np == NGX_ERROR) {
             return "invalid number";
         }
