@@ -97,7 +97,7 @@ static ngx_int_t ngx_http_zstd_accept_encoding(ngx_str_t *ae);
 static ngx_uint_t ngx_http_zstd_quantity(u_char *p, u_char *last);
 
 static ngx_int_t ngx_http_zstd_filter_init(ngx_conf_t *cf);
-static void * ngx_http_zstd_create_main_conf(ngx_conf_t *cf);
+static void *ngx_http_zstd_create_main_conf(ngx_conf_t *cf);
 static char *ngx_http_zstd_init_main_conf(ngx_conf_t *cf, void *conf);
 static void *ngx_http_zstd_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent,
@@ -107,7 +107,7 @@ static ngx_int_t ngx_http_zstd_add_variables(ngx_conf_t *cf);
 static ngx_int_t ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *vv, uintptr_t data);
 
-static void * ngx_http_zstd_filter_alloc(void *opaque, size_t size);
+static void *ngx_http_zstd_filter_alloc(void *opaque, size_t size);
 static void ngx_http_zstd_filter_free(void *opaque, void *address);
 static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
 
@@ -429,6 +429,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     char         *hint;
     ngx_chain_t  *cl;
     ngx_buf_t    *b;
+    unsigned      last_action;
 
     ngx_log_debug8(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "zstd compress in: src:%p pos:%ud size: %ud, "
@@ -477,7 +478,7 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
     ctx->redo = 0;
 
-    unsigned last_action = ctx->action;
+    last_action = ctx->action;
 
     if (rc > 0) {
         if (ctx->action == NGX_HTTP_ZSTD_FILTER_COMPRESS) {
@@ -967,7 +968,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         } else {
             /*
              * compression level is different from the outer block,
-             * so we should create a seperate dict object.
+             * so we should create a separate dict object.
              */
 
             fd = ngx_open_file(zmcf->dict_file.data, NGX_FILE_RDONLY,
