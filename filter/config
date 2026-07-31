@@ -1,4 +1,5 @@
 ngx_feature_incs="#include <zstd.h>"
+ngx_feature_name=
 ngx_feature_test="(void) ZSTD_createCCtx();"
 ngx_feature_libs=
 ngx_feature_run=yes

@@ -89,7 +89,7 @@ Specifies the external dictionary.
 
 **Syntax:** *zstd on | off;*  
 **Default:** *zstd off;*  
-**Context:** *http, server, location, if in location*
+**Context:** *http, server, location, if in location, when*
 
 Enables or disables zstd compression for response.
 
@@ -97,15 +97,16 @@ Enables or disables zstd compression for response.
 
 **Syntax:** *zstd_comp_level level;*  
 **Default:** *zstd_comp_level 1;*  
-**Context:** *http, server, location*
+**Context:** *http, server, location, when*
 
-Sets a zstd compression level of a response. Acceptable values are in the range from 1 to `ZSTD_maxCLevel()`.
+Sets a zstd compression level of a response. Acceptable values are in the
+range from `ZSTD_minCLevel()` to `ZSTD_maxCLevel()`, excluding `0`.
 
 ### zstd_min_length
 
 **Syntax:** *zstd_min_length length;*  
 **Default:** *zstd_min_length 20;*  
-**Context:** *http, server, location*
+**Context:** *http, server, location, when*
 
 Sets the minimum length of a response that will be compressed by zstd. The length is determined only from the `Content-Length` response header field.
 
@@ -113,7 +114,7 @@ Sets the minimum length of a response that will be compressed by zstd. The lengt
 
 **Syntax:** *zstd_max_length length;*  
 **Default:** *zstd_max_length 0;*  
-**Context:** *http, server, location*
+**Context:** *http, server, location, when*
 
 Sets the maximum length of a response that will be compressed by zstd. The length is determined only from the "Content-Length" response header field. A value of 0 means no upper limit.
 

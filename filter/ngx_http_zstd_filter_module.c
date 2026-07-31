@@ -10,6 +10,10 @@
 
 #include <zstd.h>
 
+#if (NGX_CONDITION)
+#include <ngx_http_condition_module.h>
+#endif
+
 
 #define NGX_HTTP_ZSTD_FILTER_COMPRESS       0
 #define NGX_HTTP_ZSTD_FILTER_FLUSH          1
@@ -21,11 +25,26 @@ typedef struct {
 } ngx_http_zstd_main_conf_t;
 
 
+#if (NGX_CONDITION)
 typedef struct {
+    ngx_int_t                    level;
+    ZSTD_CDict                  *dict;
+} ngx_http_zstd_dict_t;
+#endif
+
+
+typedef struct {
+#if (NGX_CONDITION)
+    ngx_array_t                 *enable;
+    ngx_array_t                 *level;
+    ngx_array_t                 *min_length;
+    ngx_array_t                 *max_length;
+#else
     ngx_flag_t                   enable;
     ngx_int_t                    level;
     ssize_t                      min_length;
     ssize_t                      max_length;
+#endif
 
     ngx_hash_t                   types;
 
@@ -34,7 +53,11 @@ typedef struct {
     ngx_array_t                 *types_keys;
     ngx_array_t                 *bypass;
 
+#if (NGX_CONDITION)
+    ngx_array_t                 *dicts;
+#else
     ZSTD_CDict                  *dict;
+#endif
 } ngx_http_zstd_loc_conf_t;
 
 
@@ -56,6 +79,10 @@ typedef struct {
 
     ngx_http_request_t          *request;
 
+#if (NGX_CONDITION)
+    ngx_int_t                    level;
+    ZSTD_CDict                  *dict;
+#endif
     size_t                       bytes_in;
     size_t                       bytes_out;
 
@@ -111,7 +138,18 @@ static void *ngx_http_zstd_filter_alloc(void *opaque, size_t size);
 static void ngx_http_zstd_filter_free(void *opaque, void *address);
 static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
 
-static char *ngx_http_zstd_set_num_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static char *ngx_http_zstd_set_num_slot(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+#if (NGX_CONDITION)
+static char *ngx_http_zstd_set_conditional_num_slot(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_http_zstd_merge_dicts(ngx_conf_t *cf,
+    ngx_http_zstd_loc_conf_t *conf, ngx_http_zstd_loc_conf_t *prev,
+    ngx_http_zstd_main_conf_t *zmcf);
+static ZSTD_CDict *ngx_http_zstd_get_dict(ngx_http_zstd_loc_conf_t *zlcf,
+    ngx_int_t level);
+static void ngx_http_zstd_free_dict(void *data);
+#endif
 
 
 static ngx_http_zstd_comp_level_bounds_t  ngx_http_zstd_comp_level_bounds = {
@@ -122,16 +160,34 @@ static ngx_http_zstd_comp_level_bounds_t  ngx_http_zstd_comp_level_bounds = {
 static ngx_command_t  ngx_http_zstd_filter_commands[] = {
 
     { ngx_string("zstd"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF
-      |NGX_CONF_FLAG,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF
+                        |NGX_HTTP_LIF_CONF
+#if (NGX_CONDITION)
+                        |NGX_HTTP_MAIN_WHEN_CONF|NGX_HTTP_SRV_WHEN_CONF
+                        |NGX_HTTP_LOC_WHEN_CONF
+#endif
+                        |NGX_CONF_FLAG,
+#if (NGX_CONDITION)
+      ngx_conf_set_conditional_flag_slot,
+#else
       ngx_conf_set_flag_slot,
+#endif
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, enable),
       NULL },
 
     { ngx_string("zstd_comp_level"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF
+#if (NGX_CONDITION)
+                        |NGX_HTTP_MAIN_WHEN_CONF|NGX_HTTP_SRV_WHEN_CONF
+                        |NGX_HTTP_LOC_WHEN_CONF
+#endif
+                        |NGX_CONF_TAKE1,
+#if (NGX_CONDITION)
+      ngx_http_zstd_set_conditional_num_slot,
+#else
       ngx_http_zstd_set_num_slot,
+#endif
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, level),
       &ngx_http_zstd_comp_level_bounds },
@@ -151,15 +207,33 @@ static ngx_command_t  ngx_http_zstd_filter_commands[] = {
       NULL },
 
     { ngx_string("zstd_min_length"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF
+#if (NGX_CONDITION)
+                        |NGX_HTTP_MAIN_WHEN_CONF|NGX_HTTP_SRV_WHEN_CONF
+                        |NGX_HTTP_LOC_WHEN_CONF
+#endif
+                        |NGX_CONF_TAKE1,
+#if (NGX_CONDITION)
+      ngx_conf_set_conditional_size_slot,
+#else
       ngx_conf_set_size_slot,
+#endif
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, min_length),
       NULL },
 
     { ngx_string("zstd_max_length"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF
+#if (NGX_CONDITION)
+                        |NGX_HTTP_MAIN_WHEN_CONF|NGX_HTTP_SRV_WHEN_CONF
+                        |NGX_HTTP_LOC_WHEN_CONF
+#endif
+                        |NGX_CONF_TAKE1,
+#if (NGX_CONDITION)
+      ngx_conf_set_conditional_size_slot,
+#else
       ngx_conf_set_size_slot,
+#endif
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_loc_conf_t, max_length),
       NULL },
@@ -216,22 +290,42 @@ ngx_module_t  ngx_http_zstd_filter_module = {
 static ngx_int_t
 ngx_http_zstd_header_filter(ngx_http_request_t *r)
 {
+#if (NGX_CONDITION)
+    size_t                       min_length, max_length;
+#endif
     ngx_table_elt_t           *h;
     ngx_http_zstd_loc_conf_t  *zlcf;
     ngx_http_zstd_ctx_t       *ctx;
 
     zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
 
+#if (NGX_CONDITION)
+    if (!ngx_http_get_conditional_flag_value(r, zlcf->enable)) {
+        return ngx_http_next_header_filter(r);
+    }
+
+    min_length = ngx_http_get_conditional_size_value(r, zlcf->min_length);
+    max_length = ngx_http_get_conditional_size_value(r, zlcf->max_length);
+
+    if ((r->headers_out.status != NGX_HTTP_OK
+#else
     if (!zlcf->enable
         || (r->headers_out.status != NGX_HTTP_OK
+#endif
             && r->headers_out.status != NGX_HTTP_FORBIDDEN
             && r->headers_out.status != NGX_HTTP_NOT_FOUND)
        || (r->headers_out.content_encoding
            && r->headers_out.content_encoding->value.len)
        || (r->headers_out.content_length_n != -1
+#if (NGX_CONDITION)
+           && (r->headers_out.content_length_n < (off_t) min_length
+               || (max_length > 0
+                   && r->headers_out.content_length_n > (off_t) max_length)))
+#else
            && (r->headers_out.content_length_n < zlcf->min_length
                || (zlcf->max_length > 0
                    && r->headers_out.content_length_n > zlcf->max_length)))
+#endif
        || ngx_http_test_content_type(r, &zlcf->types) == NULL
        || r->header_only)
     {
@@ -265,6 +359,10 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
 
     ctx->request = r;
     ctx->last_out = &ctx->out;
+#if (NGX_CONDITION)
+    ctx->level = ngx_http_get_conditional_num_value(r, zlcf->level);
+    ctx->dict = ngx_http_zstd_get_dict(zlcf, ctx->level);
+#endif
 
     h = ngx_list_push(&r->headers_out.headers);
     if (h == NULL) {
@@ -630,11 +728,23 @@ ngx_http_zstd_filter_create_cstream(ngx_http_request_t *r,
     ngx_http_zstd_ctx_t *ctx)
 {
     size_t                      rc;
+    ngx_int_t                   level;
+    ZSTD_CDict                 *dict;
     ZSTD_CStream               *cstream;
     ZSTD_customMem              cmem;
+#if !(NGX_CONDITION)
     ngx_http_zstd_loc_conf_t   *zlcf;
 
     zlcf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_filter_module);
+#endif
+
+#if (NGX_CONDITION)
+    level = ctx->level;
+    dict = ctx->dict;
+#else
+    level = zlcf->level;
+    dict = zlcf->dict;
+#endif
 
     cmem.customAlloc = ngx_http_zstd_filter_alloc;
     cmem.customFree = ngx_http_zstd_filter_free;
@@ -650,7 +760,7 @@ ngx_http_zstd_filter_create_cstream(ngx_http_request_t *r,
 
     /* TODO use the advanced initialize functions */
 
-    if (zlcf->dict) {
+    if (dict) {
 #if ZSTD_VERSION_NUMBER >= 10500
         rc = ZSTD_CCtx_reset(cstream, ZSTD_reset_session_only);
         if (ZSTD_isError(rc)) {
@@ -660,7 +770,7 @@ ngx_http_zstd_filter_create_cstream(ngx_http_request_t *r,
             goto failed;
         }
 
-        rc = ZSTD_CCtx_refCDict(cstream, zlcf->dict);
+        rc = ZSTD_CCtx_refCDict(cstream, dict);
         if (ZSTD_isError(rc)) {
             ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
                           "ZSTD_CCtx_refCDict() failed: %s",
@@ -668,7 +778,7 @@ ngx_http_zstd_filter_create_cstream(ngx_http_request_t *r,
             goto failed;
         }
 #else
-        rc = ZSTD_initCStream_usingCDict(cstream, zlcf->dict);
+        rc = ZSTD_initCStream_usingCDict(cstream, dict);
 #endif
         if (ZSTD_isError(rc)) {
             ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
@@ -679,7 +789,7 @@ ngx_http_zstd_filter_create_cstream(ngx_http_request_t *r,
         }
 
     } else {
-        rc = ZSTD_initCStream(cstream, zlcf->level);
+        rc = ZSTD_initCStream(cstream, level);
         if (ZSTD_isError(rc)) {
             ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
                           "ZSTD_initCStream() failed: %s",
@@ -910,13 +1020,24 @@ ngx_http_zstd_create_loc_conf(ngx_conf_t *cf)
      *    conf->bufs.num = 0;
      *    conf->types = { NULL };
      *    conf->types_keys = NULL;
+#if (NGX_CONDITION)
+     *    conf->dicts = NULL;
+#else
      *    conf->dict = NULL;
+#endif
      */
 
+#if (NGX_CONDITION)
+    conf->enable = NGX_CONF_UNSET_PTR;
+    conf->level = NGX_CONF_UNSET_PTR;
+    conf->min_length = NGX_CONF_UNSET_PTR;
+    conf->max_length = NGX_CONF_UNSET_PTR;
+#else
     conf->enable = NGX_CONF_UNSET;
     conf->level = NGX_CONF_UNSET;
     conf->min_length = NGX_CONF_UNSET;
     conf->max_length = NGX_CONF_UNSET;
+#endif
     conf->bypass = NGX_CONF_UNSET_PTR;
 
     return conf;
@@ -929,22 +1050,52 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_zstd_loc_conf_t *prev = parent;
     ngx_http_zstd_loc_conf_t *conf = child;
 
+#if !(NGX_CONDITION)
     ngx_fd_t                    fd;
     size_t                      size;
     ssize_t                     n;
     char                       *rc;
     u_char                     *buf;
     ngx_file_info_t             info;
+#endif
     ngx_http_zstd_main_conf_t  *zmcf;
 
+#if !(NGX_CONDITION)
     rc = NGX_OK;
     buf = NULL;
     fd = NGX_INVALID_FILE;
+#endif
 
+#if (NGX_CONDITION)
+    if (ngx_conf_merge_conditional_flag_value(cf, &conf->enable,
+            prev->enable, 0) != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_conf_merge_conditional_num_value(cf, &conf->level,
+            prev->level, 1) != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_conf_merge_conditional_size_value(cf, &conf->min_length,
+            prev->min_length, 20) != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_conf_merge_conditional_size_value(cf, &conf->max_length,
+            prev->max_length, 0) != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+#else
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
     ngx_conf_merge_value(conf->level, prev->level, 1);
     ngx_conf_merge_value(conf->min_length, prev->min_length, 20);
     ngx_conf_merge_value(conf->max_length, prev->max_length, 0);
+#endif
     ngx_conf_merge_ptr_value(conf->bypass, prev->bypass, NULL);
 
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
@@ -954,11 +1105,15 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         return NGX_CONF_ERROR;
     }
 
-    ngx_conf_merge_ptr_value(conf->dict, prev->dict, NULL);
     ngx_conf_merge_bufs_value(conf->bufs, prev->bufs,
                               (128 * 1024) / ngx_pagesize, ngx_pagesize);
 
     zmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_zstd_filter_module);
+
+#if (NGX_CONDITION)
+    return ngx_http_zstd_merge_dicts(cf, conf, prev, zmcf);
+#else
+    ngx_conf_merge_ptr_value(conf->dict, prev->dict, NULL);
 
     if (conf->enable && zmcf->dict_file.len > 0) {
 
@@ -1037,7 +1192,181 @@ close:
     }
 
     return rc;
+#endif
 }
+
+
+#if (NGX_CONDITION)
+static ZSTD_CDict *
+ngx_http_zstd_get_dict(ngx_http_zstd_loc_conf_t *zlcf, ngx_int_t level)
+{
+    ngx_uint_t              i;
+    ngx_http_zstd_dict_t   *dict;
+
+    if (zlcf->dicts == NULL) {
+        return NULL;
+    }
+
+    dict = zlcf->dicts->elts;
+
+    for (i = 0; i < zlcf->dicts->nelts; i++) {
+        if (dict[i].level == level) {
+            return dict[i].dict;
+        }
+    }
+
+    return NULL;
+}
+
+
+static char *
+ngx_http_zstd_merge_dicts(ngx_conf_t *cf,
+    ngx_http_zstd_loc_conf_t *conf, ngx_http_zstd_loc_conf_t *prev,
+    ngx_http_zstd_main_conf_t *zmcf)
+{
+    ngx_fd_t                       fd;
+    size_t                         size;
+    ssize_t                        n;
+    u_char                        *buf;
+    ngx_uint_t                     i, missing, nelts;
+    ngx_file_info_t                info;
+    ngx_pool_cleanup_t            *cln;
+    ngx_http_zstd_dict_t          *dict;
+    ngx_conf_condition_num_ctx_t  *level;
+
+    if (zmcf->dict_file.len == 0) {
+        return NGX_CONF_OK;
+    }
+
+    nelts = conf->level->nelts;
+    if (prev->dicts != NULL) {
+        nelts += prev->dicts->nelts;
+    }
+
+    conf->dicts = ngx_array_create(cf->pool, nelts,
+                                   sizeof(ngx_http_zstd_dict_t));
+    if (conf->dicts == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    if (prev->dicts != NULL) {
+        dict = ngx_array_push_n(conf->dicts, prev->dicts->nelts);
+        if (dict == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        ngx_memcpy(dict, prev->dicts->elts,
+                   prev->dicts->nelts * sizeof(ngx_http_zstd_dict_t));
+    }
+
+    missing = 0;
+    level = conf->level->elts;
+
+    for (i = 0; i < conf->level->nelts; i++) {
+        if (ngx_http_zstd_get_dict(conf, level[i].value) == NULL) {
+            missing++;
+        }
+    }
+
+    if (missing == 0) {
+        return NGX_CONF_OK;
+    }
+
+    fd = ngx_open_file(zmcf->dict_file.data, NGX_FILE_RDONLY,
+                       NGX_FILE_OPEN, 0);
+
+    if (fd == NGX_INVALID_FILE) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_open_file_n " \"%V\" failed",
+                           &zmcf->dict_file);
+
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_fd_info(fd, &info) == NGX_FILE_ERROR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_fd_info_n " \"%V\" failed",
+                           &zmcf->dict_file);
+        goto failed;
+    }
+
+    size = ngx_file_size(&info);
+    buf = ngx_palloc(cf->pool, size);
+    if (buf == NULL) {
+        goto failed;
+    }
+
+    n = ngx_read_fd(fd, (void *) buf, size);
+    if (n < 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_read_fd_n " \"%V\" failed",
+                           &zmcf->dict_file);
+        goto failed;
+    }
+
+    if ((size_t) n != size) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           ngx_read_fd_n " \"%V\" incomplete",
+                           &zmcf->dict_file);
+        goto failed;
+    }
+
+    for (i = 0; i < conf->level->nelts; i++) {
+        if (ngx_http_zstd_get_dict(conf, level[i].value) != NULL) {
+            continue;
+        }
+
+        dict = ngx_array_push(conf->dicts);
+        if (dict == NULL) {
+            goto failed;
+        }
+
+        dict->level = level[i].value;
+        dict->dict = ZSTD_createCDict_byReference(buf, size, dict->level);
+        if (dict->dict == NULL) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "ZSTD_createCDict_byReference() failed");
+            goto failed;
+        }
+
+        cln = ngx_pool_cleanup_add(cf->pool, 0);
+        if (cln == NULL) {
+            ZSTD_freeCDict(dict->dict);
+            dict->dict = NULL;
+            goto failed;
+        }
+
+        cln->handler = ngx_http_zstd_free_dict;
+        cln->data = dict->dict;
+    }
+
+    if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_close_file_n " \"%V\" failed",
+                           &zmcf->dict_file);
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+
+failed:
+
+    if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_close_file_n " \"%V\" failed",
+                           &zmcf->dict_file);
+    }
+
+    return NGX_CONF_ERROR;
+}
+
+
+static void
+ngx_http_zstd_free_dict(void *data)
+{
+    ZSTD_freeCDict(data);
+}
+#endif
 
 
 static ngx_int_t
@@ -1196,3 +1525,56 @@ ngx_http_zstd_set_num_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     return NGX_CONF_OK;
 }
+
+
+#if (NGX_CONDITION)
+static char *
+ngx_http_zstd_set_conditional_num_slot(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf)
+{
+    char                              *rv;
+    ngx_uint_t                         created;
+    ngx_array_t                      **values;
+    ngx_command_t                      local_cmd;
+    ngx_conf_condition_num_ctx_t      *ctx;
+
+    values = (ngx_array_t **) ((u_char *) conf + cmd->offset);
+
+    if (*values == NULL || *values == NGX_CONF_UNSET_PTR) {
+        *values = ngx_array_create(cf->pool, 2,
+                                   sizeof(ngx_conf_condition_num_ctx_t));
+        if (*values == NULL) {
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    ctx = ngx_condition_find_expr_ctx(*values,
+              ngx_condition_get_associated_expr_id(cf),
+              sizeof(ngx_conf_condition_num_ctx_t),
+              offsetof(ngx_conf_condition_num_ctx_t, expr_id));
+
+    created = 0;
+
+    if (ctx == NULL) {
+        ctx = ngx_array_push(*values);
+        if (ctx == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        ctx->value = NGX_CONF_UNSET;
+        ctx->expr_id = ngx_condition_get_associated_expr_id(cf);
+        created = 1;
+    }
+
+    local_cmd = *cmd;
+    local_cmd.offset = offsetof(ngx_conf_condition_num_ctx_t, value);
+
+    rv = ngx_http_zstd_set_num_slot(cf, &local_cmd, ctx);
+
+    if (rv != NGX_CONF_OK && created) {
+        (*values)->nelts--;
+    }
+
+    return rv;
+}
+#endif
