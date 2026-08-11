@@ -802,6 +802,7 @@ ngx_http_zstd_filter_create_cstream(ngx_http_request_t *r,
     return cstream;
 
 failed:
+
     rc = ZSTD_freeCStream(cstream);
     if (ZSTD_isError(rc)) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
@@ -1390,6 +1391,9 @@ ngx_http_zstd_filter_alloc(void *opaque, size_t size)
     void  *p;
 
     p = ngx_palloc(ctx->request->pool, size);
+    if (p == NULL) {
+        return NULL;
+    }
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ctx->request->connection->log, 0,
                    "zstd alloc: %p, size: %uz", p, size);
@@ -1510,6 +1514,7 @@ ngx_http_zstd_set_num_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         }
 
         *np = -*np;
+
     } else {
         *np = ngx_atoi(value[1].data, value[1].len);
 
@@ -1549,9 +1554,10 @@ ngx_http_zstd_set_conditional_num_slot(ngx_conf_t *cf, ngx_command_t *cmd,
     }
 
     ctx = ngx_condition_find_expr_ctx(*values,
-              ngx_condition_get_associated_expr_id(cf),
-              sizeof(ngx_conf_condition_num_ctx_t),
-              offsetof(ngx_conf_condition_num_ctx_t, expr_id));
+                                      ngx_condition_get_associated_expr_id(cf),
+                                      sizeof(ngx_conf_condition_num_ctx_t),
+                                      offsetof(ngx_conf_condition_num_ctx_t,
+                                               expr_id));
 
     created = 0;
 

@@ -164,7 +164,7 @@ Content-Length: 59738
 --- no_error_log
 [error]
 
-=== TEST 8 zstd & gzip
+=== TEST 8: zstd & gzip
 --- config
     location /filter {
         zstd on;
@@ -191,7 +191,7 @@ Content-type: text/plain
 --- no_error_log
 [error]
 
-=== TEST 9 zstd & gzip (Accept-Encoding start with gzip)
+=== TEST 9: zstd & gzip (Accept-Encoding start with gzip)
 --- config
     location /filter {
         zstd on;
@@ -218,7 +218,7 @@ Content-type: text/plain
 --- no_error_log
 [error]
 
-=== TEST 10 zstd & gzip (hit gzip)
+=== TEST 10: zstd & gzip (hit gzip)
 --- config
     location /filter {
         zstd on;
@@ -245,7 +245,7 @@ Content-type: text/plain
 --- no_error_log
 [error]
 
-=== TEST 11 zstd on (file does not exist)
+=== TEST 11: zstd on (file does not exist)
 --- config
     location /filter {
         zstd on;
@@ -263,7 +263,7 @@ Accept-Encoding: gzip, br
 
 
 
-=== TEST 12 zstd off (file does not exist)
+=== TEST 12: zstd off (file does not exist)
 --- config
     location /filter {
         zstd off;
