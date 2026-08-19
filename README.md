@@ -3,26 +3,28 @@ zstd-nginx-module - Nginx module for the [Zstandard compression](https://faceboo
 
 # Table of Contents
 
-* [Name](#name)
-* [Status](#status)
-* [Synopsis](#synopsis)
-* [Installation](#installation)
-* [Directives](#directives)
-  * [ngx_http_zstd_filter_module](#ngx_http_zstd_filter_module)
-    * [zstd_dict_file](#zstd_dict_file)
-    * [zstd](#zstd)
-    * [zstd_comp_level](#zstd_comp_level)
-    * [zstd_min_length](#zstd_min_length)
-    * [zstd_max_length](#zstd_max_length)
-    * [zstd_types](#zstd_types)
-    * [zstd_buffers](#zstd_buffers)
-    * [zstd_bypass](#zstd_bypass)
-  * [ngx_http_zstd_static_module](#ngx_http_zstd_static_module)
-    * [zstd_static](#zstd_static)
-* [Variables](#variables)
-  * [ngx_http_zstd_filter_module](#ngx_http_zstd_filter_module)
-    * [$zstd_ratio](#$zstd_ratio)
-* [Author](#author)
+- [Name](#name)
+- [Table of Contents](#table-of-contents)
+- [Status](#status)
+- [Synopsis](#synopsis)
+- [Installation](#installation)
+- [Directives](#directives)
+  - [ngx\_http\_zstd\_filter\_module](#ngx_http_zstd_filter_module)
+    - [zstd\_dict\_file](#zstd_dict_file)
+    - [zstd](#zstd)
+    - [zstd\_comp\_level](#zstd_comp_level)
+    - [zstd\_min\_length](#zstd_min_length)
+    - [zstd\_max\_length](#zstd_max_length)
+    - [zstd\_types](#zstd_types)
+    - [zstd\_buffers](#zstd_buffers)
+    - [zstd\_bypass](#zstd_bypass)
+  - [ngx\_http\_zstd\_static\_module](#ngx_http_zstd_static_module)
+    - [zstd\_static](#zstd_static)
+- [Variables](#variables)
+  - [ngx\_http\_zstd\_filter\_module](#ngx_http_zstd_filter_module-1)
+    - [$zstd\_ratio](#zstd_ratio)
+- [Author](#author)
+- [License](#license)
 
 # Status
 
@@ -64,6 +66,7 @@ server {
 
 To use theses modules, configure your nginx branch with `--add-module=/path/to/zstd-nginx-module`. Several points should be taken care of.
 
+* Zstandard 1.4.0 or later is required for `ZSTD_compressStream2()`.
 * You can set environment variables `ZSTD_INC` and `ZSTD_LIB` to specify the path to `zstd.h` and the path to zstd shared library respectively.
 * static library will be attempted prior to dynamic library, since this Nginx module uses some **advanced APIs** where static linking is recommended.
 * System's zstd bundle will be linked if `ZSTD_INC` and `ZSTD_LIB` are not specified.
@@ -168,6 +171,7 @@ Achieved compression ratio, computed as the ratio between the original and compr
 # Author
 
 Alex Zhang (张超) zchao1995@gmail.com, UPYUN Inc.
+Hanada im@hanada.info
 
 # License
 

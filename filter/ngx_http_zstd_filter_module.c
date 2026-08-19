@@ -1,6 +1,9 @@
 
 /*
+ * Copyright (C) Hanada
  * Copyright (C) Alex Zhang
+ * Copyright (C) Igor Sysoev
+ * Copyright (C) Nginx, Inc.
  */
 
 
@@ -8,16 +11,14 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#ifndef ZSTD_STATIC_LINKING_ONLY
+#define ZSTD_STATIC_LINKING_ONLY
+#endif
 #include <zstd.h>
 
 #if (NGX_CONDITION)
 #include <ngx_http_condition_module.h>
 #endif
-
-
-#define NGX_HTTP_ZSTD_FILTER_COMPRESS       0
-#define NGX_HTTP_ZSTD_FILTER_FLUSH          1
-#define NGX_HTTP_ZSTD_FILTER_END            2
 
 
 typedef struct {
@@ -86,9 +87,7 @@ typedef struct {
     size_t                       bytes_in;
     size_t                       bytes_out;
 
-    unsigned                     action:2;
     unsigned                     last:1;
-    unsigned                     redo:1;
     unsigned                     flush:1;
     unsigned                     done:1;
     unsigned                     nomem:1;
@@ -140,6 +139,7 @@ static char *ngx_http_zstd_comp_level(ngx_conf_t *cf, void *post, void *data);
 
 static char *ngx_http_zstd_set_num_slot(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static void ngx_http_zstd_free_dict(void *data);
 #if (NGX_CONDITION)
 static char *ngx_http_zstd_set_conditional_num_slot(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
@@ -148,7 +148,6 @@ static char *ngx_http_zstd_merge_dicts(ngx_conf_t *cf,
     ngx_http_zstd_main_conf_t *zmcf);
 static ZSTD_CDict *ngx_http_zstd_get_dict(ngx_http_zstd_loc_conf_t *zlcf,
     ngx_int_t level);
-static void ngx_http_zstd_free_dict(void *data);
 #endif
 
 
@@ -370,6 +369,9 @@ ngx_http_zstd_header_filter(ngx_http_request_t *r)
     }
 
     h->hash = 1;
+#if (nginx_version >= 1023000)
+    h->next = NULL;
+#endif
     ngx_str_set(&h->key, "Content-Encoding");
     ngx_str_set(&h->value, "zstd");
     r->headers_out.content_encoding = h;
@@ -489,16 +491,18 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         ngx_chain_update_chains(r->pool, &ctx->free, &ctx->busy, &ctx->out,
                                 (ngx_buf_tag_t) &ngx_http_zstd_filter_module);
 
+        ctx->out_buf = NULL;
         ctx->last_out = &ctx->out;
         ctx->nomem = 0;
         flush = 0;
 
         if (ctx->done) {
             rv = ZSTD_freeCStream(ctx->cstream);
+            ctx->cstream = NULL;
             if (ZSTD_isError(rv)) {
                 ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
                               "ZSTD_freeCStream() failed: %s",
-                              ZSTD_getErrorName(rc));
+                              ZSTD_getErrorName(rv));
 
                 rc = NGX_ERROR;
             }
@@ -510,10 +514,16 @@ ngx_http_zstd_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 failed:
 
     ctx->done = 1;
-    rv = ZSTD_freeCStream(ctx->cstream);
-    if (ZSTD_isError(rv)) {
-        ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                      "ZSTD_freeCStream() failed: %s", ZSTD_getErrorName(rv));
+
+    if (ctx->cstream != NULL) {
+        rv = ZSTD_freeCStream(ctx->cstream);
+        ctx->cstream = NULL;
+
+        if (ZSTD_isError(rv)) {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                          "ZSTD_freeCStream() failed: %s",
+                          ZSTD_getErrorName(rv));
+        }
     }
 
     return NGX_ERROR;
@@ -523,83 +533,53 @@ failed:
 static ngx_int_t
 ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
-    size_t        rc, pos_in, pos_out;
-    char         *hint;
-    ngx_chain_t  *cl;
-    ngx_buf_t    *b;
-    unsigned      last_action;
+    size_t             rc, pos_in, pos_out;
+    ngx_uint_t         flush, last;
+    ngx_chain_t       *cl;
+    ngx_buf_t         *b;
+    ZSTD_EndDirective  directive;
 
-    ngx_log_debug8(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                   "zstd compress in: src:%p pos:%ud size: %ud, "
-                   "dst:%p pos:%ud size:%ud flush:%d redo:%d",
-                   ctx->buffer_in.src, ctx->buffer_in.pos, ctx->buffer_in.size,
-                   ctx->buffer_out.dst, ctx->buffer_out.pos,
-                   ctx->buffer_out.size, ctx->flush, ctx->redo);
+    ngx_log_debug6(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "zstd compress in: src:%p pos:%uz size:%uz "
+                   "dst:%p pos:%uz size:%uz",
+                   ctx->buffer_in.src, ctx->buffer_in.pos,
+                   ctx->buffer_in.size, ctx->buffer_out.dst,
+                   ctx->buffer_out.pos, ctx->buffer_out.size);
 
     pos_in = ctx->buffer_in.pos;
     pos_out = ctx->buffer_out.pos;
 
-    switch (ctx->action) {
+    directive = ctx->last ? ZSTD_e_end
+                          : (ctx->flush ? ZSTD_e_flush : ZSTD_e_continue);
 
-    case NGX_HTTP_ZSTD_FILTER_FLUSH:
-        hint = "ZSTD_flushStream() ";
-        rc = ZSTD_flushStream(ctx->cstream, &ctx->buffer_out);
-        break;
-
-    case NGX_HTTP_ZSTD_FILTER_END:
-        hint = "ZSTD_endStream() ";
-        rc = ZSTD_endStream(ctx->cstream, &ctx->buffer_out);
-        break;
-
-    default:
-        hint = "ZSTD_compressStream() ";
-        rc = ZSTD_compressStream(ctx->cstream, &ctx->buffer_out,
-                                 &ctx->buffer_in);
-        break;
-    }
+    rc = ZSTD_compressStream2(ctx->cstream, &ctx->buffer_out,
+                              &ctx->buffer_in, directive);
 
     if (ZSTD_isError(rc)) {
         ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
-                      "%s failed: %s", hint, ZSTD_getErrorName(rc));
+                      "ZSTD_compressStream2() failed: %s",
+                      ZSTD_getErrorName(rc));
 
         return NGX_ERROR;
     }
 
     ngx_log_debug6(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                   "zstd compress out: src:%p pos:%ud size: %ud, "
-                   "dst:%p pos:%ud size:%ud",
-                   ctx->buffer_in.src, ctx->buffer_in.pos, ctx->buffer_in.size,
-                   ctx->buffer_out.dst, ctx->buffer_out.pos,
-                   ctx->buffer_out.size);
+                   "zstd compress out: src:%p pos:%uz size:%uz "
+                   "dst:%p pos:%uz size:%uz",
+                   ctx->buffer_in.src, ctx->buffer_in.pos,
+                   ctx->buffer_in.size, ctx->buffer_out.dst,
+                   ctx->buffer_out.pos, ctx->buffer_out.size);
 
-    ctx->in_buf->pos += ctx->buffer_in.pos - pos_in;
-    ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
-    ctx->redo = 0;
-
-    last_action = ctx->action;
-
-    if (rc > 0) {
-        if (ctx->action == NGX_HTTP_ZSTD_FILTER_COMPRESS) {
-            ctx->action = NGX_HTTP_ZSTD_FILTER_FLUSH;
-        }
-
-        ctx->redo = 1;
-
-    } else if (ctx->last && ctx->action != NGX_HTTP_ZSTD_FILTER_END) {
-        ctx->redo = 1;
-        ctx->action = NGX_HTTP_ZSTD_FILTER_END;
-
-        /* pending to call the ZSTD_endStream() */
-
-        return NGX_AGAIN;
-
-    } else {
-        ctx->action = NGX_HTTP_ZSTD_FILTER_COMPRESS; /* restore */
+    if (ctx->buffer_in.pos != pos_in) {
+        ctx->in_buf->pos += ctx->buffer_in.pos - pos_in;
     }
 
-    if (ngx_buf_size(ctx->out_buf) == 0
-        && last_action != NGX_HTTP_ZSTD_FILTER_FLUSH)
-    {
+    ctx->out_buf->last += ctx->buffer_out.pos - pos_out;
+
+    last = (directive == ZSTD_e_end && rc == 0);
+    flush = (directive == ZSTD_e_flush && rc == 0);
+
+    if (ngx_buf_size(ctx->out_buf) == 0 && !last && !flush) {
         return NGX_AGAIN;
     }
 
@@ -609,21 +589,27 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     }
 
     b = ctx->out_buf;
-    if (ngx_buf_size(b) == 0) {
-        b = ngx_calloc_buf(ctx->request->pool);
-        if (b == NULL) {
-            return NGX_ERROR;
-        }
-    }
 
-    if (rc == 0 && (ctx->flush || ctx->last)) {
+    if (flush) {
         r->connection->buffered &= ~NGX_HTTP_GZIP_BUFFERED;
 
-        b->flush = ctx->flush;
-        b->last_buf = ctx->last;
+        if (ngx_buf_size(b) == 0) {
+            b->temporary = 0;
+        }
 
-        ctx->done = ctx->last;
+        b->flush = 1;
         ctx->flush = 0;
+    }
+
+    if (last) {
+        r->connection->buffered &= ~NGX_HTTP_GZIP_BUFFERED;
+
+        if (ngx_buf_size(b) == 0) {
+            b->temporary = 0;
+        }
+
+        b->last_buf = 1;
+        ctx->done = 1;
     }
 
     ctx->bytes_out += ngx_buf_size(b);
@@ -636,17 +622,18 @@ ngx_http_zstd_filter_compress(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 
     ngx_memzero(&ctx->buffer_out, sizeof(ZSTD_outBuffer));
 
-    return ctx->last && rc == 0 ? NGX_OK : NGX_AGAIN;
+    return last ? NGX_OK : NGX_AGAIN;
 }
 
 
 static ngx_int_t
 ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
 {
+    ngx_chain_t  *cl;
+
     if (ctx->buffer_in.pos < ctx->buffer_in.size
         || ctx->flush
-        || ctx->last
-        || ctx->redo)
+        || ctx->last)
     {
         return NGX_OK;
     }
@@ -658,14 +645,20 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         return NGX_DECLINED;
     }
 
-    ctx->in_buf = ctx->in->buf;
-    ctx->in = ctx->in->next;
+    cl = ctx->in;
+    ctx->in_buf = cl->buf;
+    ctx->in = cl->next;
+    ngx_free_chain(r->pool, cl);
 
-    if (ctx->in_buf->flush) {
-        ctx->flush = 1;
-
-    } else if (ctx->in_buf->last_buf) {
+    if (ctx->in_buf->last_buf) {
         ctx->last = 1;
+
+    } else if (ctx->in_buf->flush) {
+        ctx->flush = 1;
+    }
+
+    if (ngx_buf_size(ctx->in_buf) == 0) {
+        return (ctx->last || ctx->flush) ? NGX_OK : NGX_AGAIN;
     }
 
     ctx->buffer_in.src = ctx->in_buf->pos;
@@ -673,10 +666,6 @@ ngx_http_zstd_filter_add_data(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ctx->buffer_in.size = ngx_buf_size(ctx->in_buf);
 
     ctx->bytes_in += ngx_buf_size(ctx->in_buf);
-
-    if (ctx->buffer_in.size == 0) {
-        return NGX_AGAIN;
-    }
 
     return NGX_OK;
 }
@@ -688,7 +677,9 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
     ngx_chain_t               *cl;
     ngx_http_zstd_loc_conf_t  *zlcf;
 
-    if (ctx->buffer_out.pos < ctx->buffer_out.size) {
+    if (ctx->out_buf != NULL
+        && ctx->buffer_out.pos < ctx->buffer_out.size)
+    {
         return NGX_OK;
     }
 
@@ -699,6 +690,12 @@ ngx_http_zstd_filter_get_buf(ngx_http_request_t *r, ngx_http_zstd_ctx_t *ctx)
         ctx->free = ctx->free->next;
         ctx->out_buf = cl->buf;
         ngx_free_chain(r->pool, cl);
+
+        ctx->out_buf->temporary = 1;
+        ctx->out_buf->flush = 0;
+        ctx->out_buf->sync = 0;
+        ctx->out_buf->last_buf = 0;
+        ctx->out_buf->last_in_chain = 0;
 
     } else if (ctx->bufs < zlcf->bufs.num) {
         ctx->out_buf = ngx_create_temp_buf(r->pool, zlcf->bufs.size);
@@ -831,7 +828,7 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    if (ngx_memcmp(ae->value.data, "zstd", 4) != 0
+    if (ngx_memcmp(ae->value.data, "zstd,", 5) != 0
         && ngx_http_zstd_accept_encoding(&ae->value) != NGX_OK)
     {
         return NGX_DECLINED;
@@ -845,7 +842,12 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
 
 
 /*
- * a copy of ngx_http_gzip_accept_encoding, for zstd content encoding
+ * Adapted from ngx_http_gzip_accept_encoding().
+ *
+ * zstd is enabled for the following quantities:
+ *     "zstd; q=0.001" ... "zstd; q=1.000"
+ * zstd is disabled for the following quantities:
+ *     "zstd; q=0" ... "zstd; q=0.000", and for any invalid cases
  */
 
 static ngx_int_t
@@ -915,10 +917,6 @@ equal:
     return NGX_OK;
 }
 
-
-/*
- * a copy of ngx_http_gzip_quantity
- */
 
 static ngx_uint_t
 ngx_http_zstd_quantity(u_char *p, u_char *last)
@@ -1058,6 +1056,7 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     char                       *rc;
     u_char                     *buf;
     ngx_file_info_t             info;
+    ngx_pool_cleanup_t         *cln;
 #endif
     ngx_http_zstd_main_conf_t  *zmcf;
 
@@ -1118,13 +1117,13 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     if (conf->enable && zmcf->dict_file.len > 0) {
 
-        if (conf->level == prev->level) {
+        if (conf->level == prev->level && prev->dict != NULL) {
             conf->dict = prev->dict;
 
         } else {
             /*
-             * compression level is different from the outer block,
-             * so we should create a separate dict object.
+             * The compression level differs, or the parent did not load a
+             * dictionary because compression was disabled there.
              */
 
             fd = ngx_open_file(zmcf->dict_file.data, NGX_FILE_RDONLY,
@@ -1179,6 +1178,17 @@ ngx_http_zstd_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                 rc = NGX_CONF_ERROR;
                 goto close;
             }
+
+            cln = ngx_pool_cleanup_add(cf->pool, 0);
+            if (cln == NULL) {
+                ZSTD_freeCDict(conf->dict);
+                conf->dict = NULL;
+                rc = NGX_CONF_ERROR;
+                goto close;
+            }
+
+            cln->handler = ngx_http_zstd_free_dict;
+            cln->data = conf->dict;
         }
     }
 
@@ -1360,6 +1370,7 @@ failed:
 
     return NGX_CONF_ERROR;
 }
+#endif
 
 
 static void
@@ -1367,7 +1378,6 @@ ngx_http_zstd_free_dict(void *data)
 {
     ZSTD_freeCDict(data);
 }
-#endif
 
 
 static ngx_int_t
@@ -1438,7 +1448,8 @@ ngx_http_zstd_ratio_variable(ngx_http_request_t *r,
     }
 
     ratio_int = (ngx_uint_t) ctx->bytes_in / ctx->bytes_out;
-    ratio_frac = (ngx_uint_t) (ctx->bytes_in * 1000 / ctx->bytes_out % 1000);
+    ratio_frac = (ngx_uint_t) ((uint64_t) ctx->bytes_in * 1000
+                               / ctx->bytes_out % 1000);
 
     vv->len = ngx_sprintf(vv->data, "%ui.%03ui", ratio_int, ratio_frac)
               - vv->data;

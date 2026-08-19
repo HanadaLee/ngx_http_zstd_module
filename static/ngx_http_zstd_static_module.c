@@ -1,6 +1,9 @@
 
 /*
+ * Copyright (C) Hanada
  * Copyright (C) Alex Zhang
+ * Copyright (C) Igor Sysoev
+ * Copyright (C) Nginx, Inc.
  */
 
 
@@ -247,7 +250,9 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
     }
 
     h->hash = 1;
+#if (nginx_version >= 1023000)
     h->next = NULL;
+#endif
     ngx_str_set(&h->key, "Content-Encoding");
     ngx_str_set(&h->value, "zstd");
     r->headers_out.content_encoding = h;
@@ -310,14 +315,11 @@ ngx_http_zstd_ok(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    if (ngx_memcmp(ae->value.data, "zstd", 4) != 0
+    if (ngx_memcmp(ae->value.data, "zstd,", 5) != 0
         && ngx_http_zstd_accept_encoding(&ae->value) != NGX_OK)
     {
         return NGX_DECLINED;
     }
-
-    r->gzip_tested = 1;
-    r->gzip_ok = 0;
 
     return NGX_OK;
 }
