@@ -1,0 +1,90 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      nginx_ref:
+        description: nginx-ext branch, tag or commit
+        default: '1.31.7'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.repository == 'HanadaLee/ngx_http_zstd_module'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out module
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Check out nginx-ext
+        uses: actions/checkout@v6
+        with:
+          repository: HanadaLee/nginx-ext
+          ref: ${{ inputs.nginx_ref || '1.31.7' }}
+          path: .ci/nginx
+          persist-credentials: false
+
+      - name: Check out ngx_expr_module
+        uses: actions/checkout@v6
+        with:
+          repository: HanadaLee/ngx_expr_module
+          path: .ci/ngx_expr_module
+          persist-credentials: false
+
+      - name: Check out test-nginx
+        uses: actions/checkout@v6
+        with:
+          repository: openresty/test-nginx
+          path: .ci/test-nginx
+          persist-credentials: false
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libpcre2-dev \
+            libssl-dev \
+            zlib1g-dev \
+            perl \
+            pkg-config \
+            libtest-base-perl \
+            libtext-diff-perl \
+            libtest-longstring-perl \
+            libwww-perl \
+            libipc-run-perl \
+            libio-socket-ssl-perl \
+            liblist-moreutils-perl \
+            libzstd-dev \
+            zstd \
+            python3
+
+      - name: Build and test
+        env:
+          TEST_EXPR: enabled
+        run: bash util/run-tests.sh
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-logs-enabled
+          path: |
+            .ci/test-output/**/*.log
+            .ci/test-output/run.log
+            t/servroot/logs/
+            servroot/logs/
+          if-no-files-found: ignore
