@@ -18,6 +18,13 @@ zstd-nginx-module - Nginx module for the [Zstandard compression](https://faceboo
     - [zstd\_types](#zstd_types)
     - [zstd\_buffers](#zstd_buffers)
     - [zstd\_bypass](#zstd_bypass)
+    - [zstd_postpone](#zstd_postpone)
+    - [zstd_no_buffer](#zstd_no_buffer)
+    - [zstd_http_version](#zstd_http_version)
+    - [zstd_proxied](#zstd_proxied)
+    - [zstd_disable](#zstd_disable)
+    - [zstd_window](#zstd_window)
+    - [zstd_target_block_size](#zstd_target_block_size)
   - [ngx\_http\_zstd\_static\_module](#ngx_http_zstd_static_module)
     - [zstd\_static](#zstd_static)
 - [Variables](#variables)
@@ -68,7 +75,6 @@ To use theses modules, configure your nginx branch with `--add-module=/path/to/z
 
 * Zstandard 1.4.0 or later is required for `ZSTD_compressStream2()`.
 * You can set environment variables `ZSTD_INC` and `ZSTD_LIB` to specify the path to `zstd.h` and the path to zstd shared library respectively.
-* static library will be attempted prior to dynamic library, since this Nginx module uses some **advanced APIs** where static linking is recommended.
 * System's zstd bundle will be linked if `ZSTD_INC` and `ZSTD_LIB` are not specified.
 * Both `ngx_http_zstd_static_module` and `ngx_http_zstd_filter_module` will be configured.
 
@@ -103,7 +109,7 @@ Enables or disables zstd compression for response.
 **Context:** *http, server, location, when*
 
 Sets a zstd compression level of a response. Acceptable values are in the
-range from `ZSTD_minCLevel()` to `ZSTD_maxCLevel()`, excluding `0`.
+range from `ZSTD_minCLevel()` to `ZSTD_maxCLevel()`, excluding `0`. Negative levels, including `-1`, are supported.
 
 ### zstd_min_length
 
@@ -145,6 +151,64 @@ Sets the number and size of buffers used to compress a response. By default the 
 
 Defines conditions under which the response will be compressed by zstd. If at least one value of the string parameters is not empty and is not equal to “0” then the response will not be compressed by zstd.
 
+### zstd_postpone
+
+**Syntax:** `zstd_postpone size;`\
+**Default:** `zstd_postpone 0;`\
+**Context:** `http`, `server`, `location`
+
+Postpones encoder initialization until the specified amount of input has been buffered. A flush or the end of the response starts compression earlier.
+
+### zstd_no_buffer
+
+**Syntax:** `zstd_no_buffer on | off;`\
+**Default:** `zstd_no_buffer off;`\
+**Context:** `http`, `server`, `location`
+
+Passes partially filled output buffers downstream when the currently available input has been consumed. This does not force an encoder flush.
+
+### zstd_http_version
+
+**Syntax:** `zstd_http_version 1.0 | 1.1;`\
+**Default:** `zstd_http_version 1.1;`\
+**Context:** `http`, `server`, `location`
+
+Alias of [gzip_http_version](https://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_http_version).
+
+### zstd_proxied
+
+**Syntax:** `zstd_proxied off | expired | no-cache | no-store | private | no_last_modified | no_etag | auth | any ...;`\
+**Default:** `zstd_proxied off;`\
+**Context:** `http`, `server`, `location`
+
+Alias of [gzip_proxied](https://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_proxied).
+
+### zstd_disable
+
+**Syntax:** `zstd_disable regex ...;`\
+**Default:** —\
+**Context:** `http`, `server`, `location`
+
+Alias of [gzip_disable](https://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_disable).
+
+### zstd_window
+
+**Syntax:** `zstd_window size;`\
+**Default:** `zstd_window 512k;`\
+**Context:** `http`, `server`, `location`
+
+Sets the Zstd window size, a power of two from `1k` to `8m`.
+
+### zstd_target_block_size
+
+**Syntax:** `zstd_target_block_size size;`\
+**Default:** `zstd_target_block_size 0;`\
+**Context:** `http`, `server`, `location`
+
+Sets the target compressed block size. This is an approximate target, independent of the output buffer size. The value `0` uses the library default.
+
+Available with libzstd 1.5.6 or later.
+
 ## ngx_http_zstd_static_module
 
 The `ngx_http_zstd_static_module` module allows sending precompressed files with the `.zst` filename extension instead of regular files.
@@ -153,9 +217,9 @@ The `ngx_http_zstd_static_module` module allows sending precompressed files with
 
 **Syntax:**	*zstd_static on | off | always;*  
 **Default:** *zstd_static off;*  
-**Context:** *http, server, location*  
+**Context:** *http, server, location, when*
 
-Enables ("on") or disables ("off") checking the existence of precompressed files. The following directives are also taken into account: `gzip_vary`.
+Enables ("on") or disables ("off") checking the existence of precompressed files. The following directives are also taken into account: `zstd_http_version`, `zstd_proxied`, `zstd_disable`, and `gzip_vary`.
 
 With the _"always"_ value, "zstd" file is used in all cases, without checking if the client supports it.
 
@@ -176,3 +240,18 @@ Hanada im@hanada.info
 # License
 
 This Nginx module is licensed under [BSD 2-Clause License](LICENSE).
+
+
+# Compatibility
+
+Dynamic compression applies to main requests with status 200, 207, 403, or 404. HEAD responses and responses with an existing nonempty `Content-Encoding` are passed through. `Cache-Control: no-transform` prevents dynamic compression.
+
+The core `gzip_http_version`, `gzip_proxied`, and `gzip_disable` settings also apply. Their defaults restrict compression to HTTP/1.1 or later and disable it for requests with a `Via` header. The `zstd_*` aliases configure the same core settings.
+
+Directives whose context includes `when` support [ngx_expr_module](https://github.com/HanadaLee/ngx_expr_module). The module also builds on unpatched nginx without expr support.
+
+# Testing
+
+`util/run-tests.sh` runs the existing suite and the regressions under `t/parity/`. The latter use [nginx-tests](https://github.com/nginx/nginx-tests) and cover proxy buffering on and off, slow clients, cancellation, streaming, HTTP/2 and HTTP/3, static files, and conditional configuration. Set `TEST_NGINX_BINARY` and `PERL5LIB` to run `prove -v t/parity/*.t` directly.
+
+Set `TEST_NGINX_ZSTD_TARGET_BLOCK_SIZE=1` when built with libzstd 1.5.6 or later. `util/run-tests.sh` detects this automatically.
