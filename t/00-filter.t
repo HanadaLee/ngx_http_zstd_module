@@ -562,7 +562,7 @@ Content-Encoding: zstd
 
 
 
-=== TEST 26: HEAD advertises the same encoding as GET
+=== TEST 26: HEAD skips dynamic compression
 --- config
     location = /t {
         zstd on;
@@ -576,8 +576,8 @@ HEAD /t
 --- more_headers
 Accept-Encoding: zstd
 --- response_headers
-Content-Encoding: zstd
-!Content-Length
+!Content-Encoding
+Content-Length: 16
 --- response_body
 --- no_error_log
 [error]

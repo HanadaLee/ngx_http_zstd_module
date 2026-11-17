@@ -51,6 +51,13 @@ jobs:
           path: .ci/test-nginx
           persist-credentials: false
 
+      - name: Check out nginx-tests
+        uses: actions/checkout@v6
+        with:
+          repository: nginx/nginx-tests
+          path: .ci/nginx-tests
+          persist-credentials: false
+
       - name: Install build and test dependencies
         run: |
           sudo apt-get update
@@ -59,6 +66,8 @@ jobs:
             libpcre2-dev \
             libssl-dev \
             zlib1g-dev \
+            python3 \
+            libcryptx-perl \
             perl \
             pkg-config \
             libtest-base-perl \

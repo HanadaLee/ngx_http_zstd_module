@@ -57,7 +57,7 @@ invalid value "maybe"
     }
 --- must_die
 --- error_log
-zstd compress level must between
+has an invalid compression level
 --- no_error_log
 [alert]
 
@@ -72,7 +72,7 @@ zstd compress level must between
     }
 --- must_die
 --- error_log
-zstd compress level must between
+has an invalid compression level
 --- no_error_log
 [alert]
 
