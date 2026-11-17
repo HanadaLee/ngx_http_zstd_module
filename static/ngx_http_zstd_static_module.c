@@ -11,16 +11,27 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#if (NGX_EXPR)
+#include <ngx_http_expr_module.h>
+#endif
 
-#define NGX_HTTP_ZSTD_STATIC_OFF        0
-#define NGX_HTTP_ZSTD_STATIC_ON         1
-#define NGX_HTTP_ZSTD_STATIC_ALWAYS     2
+
+#define NGX_HTTP_ZSTD_STATIC_OFF              0
+#define NGX_HTTP_ZSTD_STATIC_ON               1
+#define NGX_HTTP_ZSTD_STATIC_ALWAYS           2
 
 
 typedef struct {
-    ngx_uint_t  enable;
+#if (NGX_EXPR)
+    ngx_array_t  *enable;
+#else
+    ngx_uint_t    enable;
+#endif
 } ngx_http_zstd_static_conf_t;
 
+
+static ngx_int_t ngx_http_zstd_cache_control(ngx_http_request_t *r);
+static ngx_int_t ngx_http_zstd_policy(ngx_http_request_t *r);
 
 static ngx_int_t ngx_http_zstd_static_handler(ngx_http_request_t *r);
 
@@ -45,8 +56,17 @@ static ngx_conf_enum_t  ngx_http_zstd_static[] = {
 static ngx_command_t  ngx_http_zstd_static_commands[] = {
 
     { ngx_string("zstd_static"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF
+#if (NGX_EXPR)
+                        |NGX_HTTP_MAIN_WHEN_CONF|NGX_HTTP_SRV_WHEN_CONF
+                        |NGX_HTTP_LOC_WHEN_CONF
+#endif
+                        |NGX_CONF_TAKE1,
+#if (NGX_EXPR)
+      ngx_conf_set_conditional_enum_slot,
+#else
       ngx_conf_set_enum_slot,
+#endif
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_zstd_static_conf_t, enable),
       &ngx_http_zstd_static },
@@ -89,6 +109,7 @@ ngx_module_t  ngx_http_zstd_static_module = {
 static ngx_int_t
 ngx_http_zstd_static_handler(ngx_http_request_t *r)
 {
+    ngx_uint_t                    enable;
     u_char                       *p;
     size_t                        root;
     ngx_str_t                     path;
@@ -106,17 +127,28 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    if (r->uri.data[r->uri.len - 1] == '/') {
+    if (r->uri.len == 0 || r->uri.data[r->uri.len - 1] == '/') {
         return NGX_DECLINED;
     }
 
     zscf = ngx_http_get_module_loc_conf(r, ngx_http_zstd_static_module);
 
-    if (zscf->enable == NGX_HTTP_ZSTD_STATIC_OFF) {
+#if (NGX_EXPR)
+    enable = ngx_http_get_expr_enum_value(r, zscf->enable);
+#else
+    enable = zscf->enable;
+#endif
+
+    if (enable == NGX_HTTP_ZSTD_STATIC_OFF) {
         return NGX_DECLINED;
     }
 
-    if (zscf->enable == NGX_HTTP_ZSTD_STATIC_ON) {
+    if (enable == NGX_HTTP_ZSTD_STATIC_ON) {
+        if (ngx_http_zstd_policy(r) != NGX_OK) {
+            return NGX_DECLINED;
+        }
+
+        r->gzip_vary = 1;
         rc = ngx_http_zstd_ok(r);
 
     } else {
@@ -165,7 +197,6 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         != NGX_OK)
     {
         switch (of.err) {
-
         case 0:
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
 
@@ -196,7 +227,7 @@ ngx_http_zstd_static_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    if (zscf->enable == NGX_HTTP_ZSTD_STATIC_ON) {
+    if (enable == NGX_HTTP_ZSTD_STATIC_ON) {
         r->gzip_vary = 1;
 
         if (rc != NGX_OK) {
@@ -465,7 +496,11 @@ ngx_http_zstd_static_create_conf(ngx_conf_t *cf)
         return NULL;
     }
 
+#if (NGX_EXPR)
+    conf->enable = NGX_CONF_UNSET_PTR;
+#else
     conf->enable = NGX_CONF_UNSET_UINT;
+#endif
 
     return conf;
 }
@@ -477,8 +512,16 @@ ngx_http_zstd_static_merge_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_zstd_static_conf_t *prev = parent;
     ngx_http_zstd_static_conf_t *conf = child;
 
+#if (NGX_EXPR)
+    if (ngx_conf_merge_expr_enum_value(cf, &conf->enable, prev->enable,
+                                       NGX_HTTP_ZSTD_STATIC_OFF) != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+#else
     ngx_conf_merge_uint_value(conf->enable, prev->enable,
                               NGX_HTTP_ZSTD_STATIC_OFF);
+#endif
 
     return NGX_CONF_OK;
 }
@@ -498,6 +541,214 @@ ngx_http_zstd_static_init(ngx_conf_t *cf)
     }
 
     *h = ngx_http_zstd_static_handler;
+
+    return NGX_OK;
+}
+
+
+
+static ngx_int_t
+ngx_http_zstd_cache_control(ngx_http_request_t *r)
+{
+    u_char           *p, *last, *start;
+    ngx_uint_t        i, quoted;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h;
+
+    part = &r->headers_out.headers.part;
+    h = part->elts;
+
+    for (i = 0; /* void */; i++) {
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+
+        if (h[i].hash == 0
+            || h[i].key.len != sizeof("Cache-Control") - 1
+            || ngx_strncasecmp(h[i].key.data, (u_char *) "Cache-Control",
+                               sizeof("Cache-Control") - 1) != 0)
+        {
+            continue;
+        }
+
+        p = h[i].value.data;
+        last = p + h[i].value.len;
+
+        while (p < last) {
+            while (p < last && (*p == ' ' || *p == '\t' || *p == ',')) {
+                p++;
+            }
+
+            start = p;
+
+            while (p < last && *p != ' ' && *p != '\t'
+                   && *p != ',' && *p != '=')
+            {
+                p++;
+            }
+
+            if (p - start == sizeof("no-transform") - 1
+                && ngx_strncasecmp(start, (u_char *) "no-transform",
+                                   sizeof("no-transform") - 1) == 0)
+            {
+                return NGX_DECLINED;
+            }
+
+            quoted = 0;
+
+            while (p < last) {
+                if (*p == ',' && !quoted) {
+                    p++;
+                    break;
+                }
+
+                if (*p == '"') {
+                    quoted = !quoted;
+
+                } else if (*p == '\\' && quoted && p + 1 < last) {
+                    p++;
+                }
+
+                p++;
+            }
+        }
+    }
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_zstd_policy(ngx_http_request_t *r)
+{
+    time_t                     date, expires;
+    ngx_uint_t                 p;
+    ngx_table_elt_t           *e, *d, *cc;
+    ngx_http_core_loc_conf_t  *clcf;
+
+    static ngx_str_t  no_cache = ngx_string("no-cache");
+    static ngx_str_t  no_store = ngx_string("no-store");
+    static ngx_str_t  private = ngx_string("private");
+
+    if (ngx_http_zstd_cache_control(r) != NGX_OK) {
+        return NGX_DECLINED;
+    }
+
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+
+    if (r->http_version < clcf->gzip_http_version
+        || (r->headers_in.msie6 && clcf->gzip_disable_msie6))
+    {
+        return NGX_DECLINED;
+    }
+
+#if (NGX_HTTP_DEGRADATION)
+    if (clcf->gzip_disable_degradation && ngx_http_degraded(r)) {
+        return NGX_DECLINED;
+    }
+
+#endif
+
+    if (r->headers_in.via == NULL) {
+        goto ok;
+    }
+
+    p = clcf->gzip_proxied;
+
+    if (p & NGX_HTTP_GZIP_PROXIED_OFF) {
+        return NGX_DECLINED;
+    }
+
+    if (p & NGX_HTTP_GZIP_PROXIED_ANY) {
+        goto ok;
+    }
+
+    if (r->headers_in.authorization && (p & NGX_HTTP_GZIP_PROXIED_AUTH)) {
+        goto ok;
+    }
+
+    e = r->headers_out.expires;
+
+    if (e) {
+        if (!(p & NGX_HTTP_GZIP_PROXIED_EXPIRED)) {
+            return NGX_DECLINED;
+        }
+
+        expires = ngx_parse_http_time(e->value.data, e->value.len);
+        if (expires == NGX_ERROR) {
+            return NGX_DECLINED;
+        }
+
+        d = r->headers_out.date;
+
+        if (d) {
+            date = ngx_parse_http_time(d->value.data, d->value.len);
+            if (date == NGX_ERROR) {
+                return NGX_DECLINED;
+            }
+
+        } else {
+            date = ngx_time();
+        }
+
+        if (expires < date) {
+            goto ok;
+        }
+
+        return NGX_DECLINED;
+    }
+
+    cc = r->headers_out.cache_control;
+
+    if (cc) {
+        if ((p & NGX_HTTP_GZIP_PROXIED_NO_CACHE)
+            && ngx_http_parse_multi_header_lines(r, cc, &no_cache, NULL))
+        {
+            goto ok;
+        }
+
+        if ((p & NGX_HTTP_GZIP_PROXIED_NO_STORE)
+            && ngx_http_parse_multi_header_lines(r, cc, &no_store, NULL))
+        {
+            goto ok;
+        }
+
+        if ((p & NGX_HTTP_GZIP_PROXIED_PRIVATE)
+            && ngx_http_parse_multi_header_lines(r, cc, &private, NULL))
+        {
+            goto ok;
+        }
+
+        return NGX_DECLINED;
+    }
+
+    if ((p & NGX_HTTP_GZIP_PROXIED_NO_LM) && r->headers_out.last_modified) {
+        return NGX_DECLINED;
+    }
+
+    if ((p & NGX_HTTP_GZIP_PROXIED_NO_ETAG) && r->headers_out.etag) {
+        return NGX_DECLINED;
+    }
+
+ok:
+
+#if (NGX_PCRE)
+    if (clcf->gzip_disable && r->headers_in.user_agent
+        && ngx_regex_exec_array(clcf->gzip_disable,
+                                &r->headers_in.user_agent->value,
+                                r->connection->log)
+           != NGX_DECLINED)
+    {
+        return NGX_DECLINED;
+    }
+
+#endif
 
     return NGX_OK;
 }

@@ -1,3 +1,5 @@
+have=NGX_HTTP_GZIP . auto/have
+
 # build the ngx_http_zstd_static_module
 HTTP_ZSTD_SRCS="$ngx_addon_dir/static/ngx_http_zstd_static_module.c"
 
@@ -8,8 +10,10 @@ ngx_module_incs=
 ngx_module_srcs=$HTTP_ZSTD_SRCS
 ngx_module_libs=
 ngx_module_order="$ngx_module_name \
-                  ngx_http_brotli_static_module \
-                  ngx_http_gzip_static_module"
+                  ngx_http_dav_module ngx_http_autoindex_module \
+                  ngx_http_index_module ngx_http_random_index_module \
+                  ngx_http_access_module ngx_http_realip_module \
+                  ngx_http_write_filter_module"
 
 . auto/module
 

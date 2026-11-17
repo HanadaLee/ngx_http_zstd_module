@@ -1,95 +1,47 @@
-ngx_feature_incs="#include <zstd.h>"
+ngx_feature="Zstandard 1.4.0 or later"
 ngx_feature_name=
-ngx_feature_test="(void) ZSTD_createCCtx();"
-ngx_feature_libs=
-ngx_feature_run=yes
-ngx_feature_path=
+ngx_feature_run=no
+ngx_feature_incs="#include <zstd.h>"
+ngx_feature_path="$ZSTD_INC"
+ngx_feature_libs="-lzstd"
+ngx_feature_test="ZSTD_CCtx *ctx = ZSTD_createCCtx();
+                  ZSTD_inBuffer in = { NULL, 0, 0 };
+                  ZSTD_outBuffer out = { NULL, 0, 0 };
+                  ZSTD_CCtx_reset(ctx, ZSTD_reset_session_and_parameters);
+                  ZSTD_CCtx_setParameter(ctx, ZSTD_c_compressionLevel,
+                                         ZSTD_minCLevel());
+                  ZSTD_CCtx_refCDict(ctx, NULL);
+                  ZSTD_CCtx_setPledgedSrcSize(ctx, 0);
+                  ZSTD_compressStream2(ctx, &out, &in, ZSTD_e_end);
+                  (void) ZSTD_sizeof_CCtx(ctx);
+                  ZSTD_freeCCtx(ctx);"
 
-ngx_zstd_opt_I=
-ngx_zstd_opt_L=
-
-if [ -n "$ZSTD_INC" -o -n "$ZSTD_LIB" ]; then
-    ngx_feature="ZStandard static library in $ZSTD_INC and $ZSTD_LIB"
-    ngx_feature_path=$ZSTD_INC
-
-    # we try the static shared library firstly
-    ngx_zstd_opt_I="$ZSTD_INC"
-    ngx_zstd_opt_L="$ZSTD_LIB/libzstd.a"
-    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
-    NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
-
-    . auto/feature
-
-    # restore
-    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
-
-    if [ $ngx_found = no ]; then
-        # then try the dynamic shared library
-        ngx_feature="ZStandard dynamic library in $ZSTD_INC and $ZSTD_LIB"
-        ngx_zstd_opt_L="-L$ZSTD_LIB -lzstd -Wl,-rpath,$ZSTD_LIB"
-
-        SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
-        NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
-
-        . auto/feature
-
-        # restore
-        NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
-
-        if [ $ngx_found = no ]; then
-            cat << END
-            $0: error: ngx_http_zstd_filter_module requires the ZStandard library, please be sure that "\$ZSTD_INC" and "\$ZSTD_LIB" are set correctly.
-END
-            exit 1
-        fi
-
-    fi
-else
-    # auto-discovery
-    ngx_feature="ZStandard static library"
-    ngx_zstd_opt_L="-l:libzstd.a"
-
-    # still we consider the static library firstly
-    SAVED_CC_TAST_FLAGS=$CC_TEST_FLAGS
-    CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
-    SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
-    NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
-
-    . auto/feature
-
-    # restore
-    CC_TEST_FLAGS=$SAVED_CC_TAST_FLAGS
-    NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
-
-    if [ $ngx_found = no ]; then
-
-        ngx_feature="ZStandard dynamic library"
-        ngx_zstd_opt_L="-lzstd"
-        SAVED_CC_TAST_FLAGS=$CC_TEST_FLAGS
-        CC_TEST_FLAGS="$ngx_zstd_opt_I $CC_TEST_FLAGS"
-        SAVED_NGX_TEST_LD_OPT=$NGX_TEST_LD_OPT
-        NGX_TEST_LD_OPT="$ngx_zstd_opt_L $NGX_TEST_LD_OPT"
-
-        . auto/feature
-
-        if [ $ngx_found = no ]; then
-            cat << END
-            $0: error: ngx_http_zstd_filter_module requires the ZStandard library.
-END
-            exit 1
-        fi
-
-        # restore
-        CC_TEST_FLAGS=$SAVED_CC_TAST_FLAGS
-        NGX_TEST_LD_OPT=$SAVED_NGX_TEST_LD_OPT
-
-        cat << END
-        $0: warning: ngx_http_zstd_filter_module uses advanced ZStandard APIs (which are still considered experimental) while you are trying to link the dynamic shared library.
-END
-    fi
-
-    # TODO we need more tries for the different OS port.
+if [ -n "$ZSTD_LIB" ]; then
+    ngx_feature_libs="-L$ZSTD_LIB -lzstd -Wl,-rpath,$ZSTD_LIB"
 fi
+
+. auto/feature
+
+if [ "$ngx_found" = no ]; then
+    echo "$0: error: ngx_http_zstd_filter_module requires Zstandard 1.4.0 or later"
+    exit 1
+fi
+
+ngx_zstd_opt_I="$ngx_feature_path"
+ngx_zstd_opt_L="$ngx_feature_libs"
+
+ngx_feature="Zstandard target compressed block size"
+ngx_feature_name=NGX_HTTP_ZSTD_HAVE_TARGET_BLOCK_SIZE
+ngx_feature_test="
+#if ZSTD_VERSION_NUMBER < 10506
+#error target block size requires Zstandard 1.5.6 or later
+#endif
+                  ZSTD_bounds bounds;
+                  bounds = ZSTD_cParam_getBounds(ZSTD_c_targetCBlockSize);
+                  (void) bounds;"
+. auto/feature
+
+have=NGX_HTTP_GZIP . auto/have
 
 HTTP_ZSTD_SRCS="$ngx_addon_dir/filter/ngx_http_zstd_filter_module.c"
 
